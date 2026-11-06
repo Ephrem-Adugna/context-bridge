@@ -14,13 +14,13 @@ python3 install.py
 
 This installs `~/.local/bin/context-bridge` and copies the self-contained skill to both `~/.agents/skills/context-bridge` and `~/.codex/skills/context-bridge`. Reload your agent's skills if required. Other agents can load the same `SKILL.md` from their own skill folder (`--skill-dir PATH`), or implement the HTTP protocol. The installer never edits your shell configuration. If `~/.local/bin` is absent from PATH, invoke the printed absolute CLI path.
 
-Once you publish this repository on GitHub, replace `YOUR_ACCOUNT` below with its actual owner. This is the single copy/paste installation command, requiring Git and Python:
+Install from GitHub with one command (requires Git and Python 3.10+):
 
 ```sh
-git clone https://github.com/YOUR_ACCOUNT/context-bridge.git && python3 context-bridge/install.py
+git clone https://github.com/Ephrem-Adugna/context-bridge.git && python3 context-bridge/install.py
 ```
 
-The GitHub URL is a publication template, not a live download. No repository has been published by this project setup. For repeat installs, run the installer from the existing checkout instead of cloning again. Users should review code from the repository they choose to install.
+For repeat installs, run the installer from the existing checkout instead of cloning again. Users should review code from the repository they choose to install.
 
 ## Use with an agent
 

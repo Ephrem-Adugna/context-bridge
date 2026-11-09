@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 PROJECT = Path(__file__).resolve().parents[1]
 SCRIPT = PROJECT / 'skills/context-bridge/scripts/context_bridge.py'
@@ -121,14 +122,78 @@ class APITest(unittest.TestCase):
 
 
 class CLITest(unittest.TestCase):
-    def cli(self, home, *args, ok=True):
+    def cli(self, home, *args, ok=True, extra_env=None):
         env = dict(os.environ, CONTEXT_BRIDGE_HOME=str(home))
+        env.update(extra_env or {})
         result = subprocess.run([sys.executable, str(SCRIPT), *args], env=env, input='', text=True, capture_output=True, timeout=60)
         if ok:
             self.assertEqual(result.returncode, 0, result.stderr)
             return json.loads(result.stdout)
         self.assertNotEqual(result.returncode, 0)
         return result
+
+    def tunnel_env(self, folder, program):
+        binary = folder / 'cloudflared'
+        binary.write_text('#!' + sys.executable + '\n' + program)
+        binary.chmod(0o755)
+        return {'PATH': str(folder) + os.pathsep + os.environ.get('PATH', '')}
+
+    def stop_test_host(self, home):
+        # Stop through loopback, never through the fake public tunnel address.
+        for path in (home / 'hosts').glob('*/host.json'):
+            if (path.parent / 'ready.json').exists():
+                cfg = b.read(path)
+                member = b.read(home / 'memberships' / (cfg['session'] + '.json'))
+                b.request('http://127.0.0.1:' + str(cfg['port']),
+                          '/v1/sessions/' + cfg['session'] + '/admin/stop', member['admin'], {})
+                for _ in range(50):
+                    if not (path.parent / 'ready.json').exists():
+                        break
+                    time.sleep(0.1)
+
+    def test_tunnel_failure_does_not_publish_provisioning_address(self):
+        logs = [
+            'ERR failed to request quick Tunnel: Post "https://api.trycloudflare.com/tunnel": network is unreachable',
+            'ERR no connection to tunnel service',
+            'ERR https://fake.trycloudflare.com.example.org is not a tunnel address',
+        ]
+        for line in logs:
+            with self.subTest(log=line), tempfile.TemporaryDirectory() as td:
+                folder, home = Path(td), Path(td) / 'profile'
+                env = self.tunnel_env(folder, 'import sys\nprint(' + repr(line) + ', file=sys.stderr, flush=True)\nsys.exit(1)\n')
+                self.cli(home, 'profile', '--name', 'Tester')
+                try:
+                    started = time.monotonic()
+                    result = self.cli(home, 'start', '--tunnel', extra_env=env, ok=False)
+                    self.assertLess(time.monotonic() - started, 10)
+                    self.assertEqual(result.stdout, '')
+                    self.assertIn('Host failed to start', result.stderr)
+                    host = next((home / 'hosts').iterdir())
+                    self.assertFalse((host / 'ready.json').exists())
+                    self.assertEqual(b.read(host / 'host.json')['url'], '')
+                    self.assertEqual(b.read(next((home / 'memberships').iterdir()))['url'], '')
+                    self.assertIn('without providing a usable session address', (host / 'service.log').read_text())
+                finally:
+                    self.stop_test_host(home)
+
+    def test_tunnel_accepts_real_address_after_api_log(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder, home = Path(td), Path(td) / 'profile'
+            env = self.tunnel_env(folder, 'import signal\nprint("ERR https://api.trycloudflare.com/tunnel", flush=True)\nprint("| https://actual-session.trycloudflare.com |", flush=True)\nsignal.pause()\n')
+            self.cli(home, 'profile', '--name', 'Tester')
+            try:
+                result = self.cli(home, 'start', '--tunnel', extra_env=env)
+                self.assertEqual(result['url'], 'https://actual-session.trycloudflare.com')
+                self.assertEqual(b.decode_code(result['code'])['url'], result['url'])
+            finally:
+                self.stop_test_host(home)
+
+    def test_saved_provisioning_address_cannot_receive_credentials(self):
+        member = {'session': 'a' * 32, 'url': 'https://api.trycloudflare.com', 'token': 'test-member-token'}
+        with mock.patch.object(b.urllib.request, 'build_opener') as opener:
+            with self.assertRaisesRegex(ValueError, 'not a session address'):
+                b.remote(member, '/context?limit=1')
+            opener.assert_not_called()
 
     def test_full_lifecycle_separate_users_resume_and_import(self):
         with tempfile.TemporaryDirectory() as td:

@@ -73,6 +73,8 @@ def valid_url(value, insecure=False):
     p = urllib.parse.urlsplit(value)
     if p.scheme not in {'http', 'https'} or not p.hostname or p.username or p.password or p.query or p.fragment or p.path not in {'', '/'}:
         raise ValueError('Use an HTTP(S) origin with no credentials, path, query, or fragment.')
+    if p.hostname.rstrip('.') == 'api.trycloudflare.com':
+        raise ValueError('Cloudflare provisioning API is not a session address.')
     if p.port == 0:
         raise ValueError('URL port must be 1–65535.')
     local = p.hostname == 'localhost'
@@ -109,6 +111,9 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def request(url, path, token=None, body=None):
+    # Also reject a provisioning address saved by an older version before
+    # constructing any authenticated request. LAN transport was opted into earlier.
+    url = valid_url(url, insecure=True)
     headers = {'Accept': 'application/json'}
     if token:
         headers['Authorization'] = 'Bearer ' + token
@@ -357,15 +362,25 @@ def serve(cfgpath):
                 raise ValueError('Install cloudflared first, or use --public-url or --local.')
             tunnel = subprocess.Popen([binary, 'tunnel', '--url', 'http://127.0.0.1:' + str(server.server_port), '--no-autoupdate'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             found = threading.Event()
+            addresses = []
             def collect():
-                for line in tunnel.stdout:
-                    match = re.search(r'https://[a-z0-9-]+\.trycloudflare\.com', line)
-                    if match and not found.is_set():
-                        cfg['url'] = match.group()
-                        found.set()
+                try:
+                    for line in tunnel.stdout:
+                        for match in re.finditer(r'https://([a-z0-9-]+)\.trycloudflare\.com(?=[\s/\"\'<>|]|$)', line):
+                            # The provisioning API also appears in failure logs.
+                            # It is never a session origin and must not receive credentials.
+                            if match.group(1) != 'api' and not addresses:
+                                addresses.append(match.group())
+                                found.set()
+                finally:
+                    # EOF wakes startup immediately when cloudflared fails.
+                    found.set()
             threading.Thread(target=collect, daemon=True).start()
             if not found.wait(45):
                 raise ValueError('Tunnel did not provide an address within 45 seconds.')
+            if not addresses or tunnel.poll() is not None:
+                raise ValueError('Tunnel exited without providing a usable session address.')
+            cfg['url'] = addresses[0]
         elif not cfg.get('url'):
             cfg['url'] = 'http://127.0.0.1:' + str(server.server_port)
         save(cfgpath, cfg)
